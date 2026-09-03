@@ -98,11 +98,13 @@ data: {"event": "<name>", ...}
 
 ### `POST /v1/runs/{run_id}/stop`
 
-Cancels the executor's turn task (model call, tool dispatch, and pending
-durable writes stop at their next await point) and the SSE relay. Subscribers
-receive `run.failed` with `"error":"run stopped"`; status becomes `stopped`.
-The conversation's send lock is released once the turn task is gone, so the
-next `POST /v1/runs` on the same session starts a fresh turn.
+Cancels the executor's turn (the model call or tool dispatch stops at its
+next await point) and the SSE relay. The turn record is still finished — the
+`TurnStarted` event and user message that `begin_turn` persisted are closed
+out with `TurnFinished`, and the trace is finalized — so the conversation
+history stays consistent and the next `POST /v1/runs` on the same session
+starts a fresh turn once the send lock is released. Subscribers receive
+`run.failed` with `"error":"run stopped"`; status becomes `stopped`.
 
 ### `POST /v1/runs/{run_id}/approval`
 

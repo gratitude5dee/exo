@@ -13,8 +13,8 @@ use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::OwnedMutexGuard;
-use tokio::task::AbortHandle;
 use tokio_stream::{Stream, wrappers::UnboundedReceiverStream};
+use tokio_util::sync::CancellationToken;
 
 use crate::braintrust::BraintrustTracingConfig;
 
@@ -245,7 +245,7 @@ pub struct SendResult {
 
 pub struct ExecutionStreamHandle {
     event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>,
-    producer: Option<AbortHandle>,
+    cancellation: Option<CancellationToken>,
     _send_guard: Option<OwnedMutexGuard<()>>,
 }
 
@@ -253,13 +253,13 @@ impl ExecutionStreamHandle {
     pub fn new(event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>) -> Self {
         Self {
             event_stream,
-            producer: None,
+            cancellation: None,
             _send_guard: None,
         }
     }
 
-    pub(crate) fn with_producer(mut self, producer: AbortHandle) -> Self {
-        self.producer = Some(producer);
+    pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = Some(cancellation);
         self
     }
 
@@ -268,25 +268,26 @@ impl ExecutionStreamHandle {
         self
     }
 
-    /// Handle that cancels the turn's producer task. Aborting stops model
-    /// calls and tool dispatch at their next await point; the stream then ends
-    /// without a `Completed` event. Present only for turns executed on a
+    /// Handle that cancels the turn's execution. Cancelling stops model calls
+    /// and tool dispatch at their next await point; the producer still
+    /// finishes the turn record and trace, then ends the stream with an error
+    /// instead of a `Completed` event. Present only for turns executed on a
     /// spawned producer.
     pub fn cancellation(&self) -> Option<ExecutionCancellation> {
-        self.producer.clone().map(ExecutionCancellation)
+        self.cancellation.clone().map(ExecutionCancellation)
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct ExecutionCancellation(AbortHandle);
+pub struct ExecutionCancellation(CancellationToken);
 
 impl ExecutionCancellation {
     pub fn cancel(&self) {
-        self.0.abort();
+        self.0.cancel();
     }
 
-    pub fn is_finished(&self) -> bool {
-        self.0.is_finished()
+    pub fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
     }
 }
 
