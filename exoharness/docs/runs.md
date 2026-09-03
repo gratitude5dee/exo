@@ -103,7 +103,8 @@ next await point) and the SSE relay. The turn record is still finished — the
 `TurnStarted` event and user message that `begin_turn` persisted are closed
 out with `TurnFinished`, and the trace is finalized — so the conversation
 history stays consistent and the next `POST /v1/runs` on the same session
-starts a fresh turn once the send lock is released. Subscribers receive
+starts a fresh turn only after that cleanup releases the conversation send
+lock (the lock outlives the relay, not just the stream consumer). Subscribers receive
 `run.failed` with `"error":"run stopped"`; status becomes `stopped`.
 
 ### `POST /v1/runs/{run_id}/approval`

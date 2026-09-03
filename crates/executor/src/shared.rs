@@ -103,7 +103,7 @@ where
     let cancellation = CancellationToken::new();
     let cancelled = cancellation.clone();
 
-    tokio::spawn(async move {
+    let producer = tokio::spawn(async move {
         let session_id = turn.record().session_id;
         let turn_id = turn.record().id;
         let turn_trace = tracer
@@ -149,7 +149,7 @@ where
     });
 
     ExecutionStreamHandle::new(UnboundedReceiverStream::new(event_rx))
-        .with_cancellation(cancellation)
+        .with_producer(producer, cancellation)
 }
 
 async fn finish_turn_trace(

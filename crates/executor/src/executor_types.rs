@@ -13,6 +13,7 @@ use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::OwnedMutexGuard;
+use tokio::task::JoinHandle;
 use tokio_stream::{Stream, wrappers::UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
 
@@ -246,7 +247,8 @@ pub struct SendResult {
 pub struct ExecutionStreamHandle {
     event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>,
     cancellation: Option<CancellationToken>,
-    _send_guard: Option<OwnedMutexGuard<()>>,
+    producer: Option<JoinHandle<()>>,
+    send_guard: Option<OwnedMutexGuard<()>>,
 }
 
 impl ExecutionStreamHandle {
@@ -254,17 +256,23 @@ impl ExecutionStreamHandle {
         Self {
             event_stream,
             cancellation: None,
-            _send_guard: None,
+            producer: None,
+            send_guard: None,
         }
     }
 
-    pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+    pub(crate) fn with_producer(
+        mut self,
+        producer: JoinHandle<()>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        self.producer = Some(producer);
         self.cancellation = Some(cancellation);
         self
     }
 
     pub(crate) fn with_send_guard(mut self, send_guard: OwnedMutexGuard<()>) -> Self {
-        self._send_guard = Some(send_guard);
+        self.send_guard = Some(send_guard);
         self
     }
 
@@ -275,6 +283,30 @@ impl ExecutionStreamHandle {
     /// spawned producer.
     pub fn cancellation(&self) -> Option<ExecutionCancellation> {
         self.cancellation.clone().map(ExecutionCancellation)
+    }
+}
+
+/// The send guard serializes turns on a conversation, so it must outlive the
+/// producer, not the consumer: a dropped (or aborted) consumer hands the guard
+/// to a task that releases it only once the producer has finished the turn.
+impl Drop for ExecutionStreamHandle {
+    fn drop(&mut self) {
+        let (Some(send_guard), Some(producer)) = (self.send_guard.take(), self.producer.take())
+        else {
+            return;
+        };
+        if producer.is_finished() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            if let Err(error) = producer.await {
+                tracing::warn!(%error, "turn producer did not finish cleanly");
+            }
+            drop(send_guard);
+        });
     }
 }
 
