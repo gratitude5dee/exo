@@ -177,8 +177,8 @@ impl Run {
         *self.cancellation.lock().expect("run cancellation poisoned") = cancellation;
     }
 
-    /// Cancel the executor's turn (model call, tool dispatch, durable writes)
-    /// and the relay, then mark the run stopped. Returns false when the run
+    /// Cancel the executor's turn (the producer still finishes the turn
+    /// record) and the relay, then mark the run stopped. Returns false when the run
     /// had already reached a terminal state.
     pub(crate) fn stop(&self) -> bool {
         let cancellation = self

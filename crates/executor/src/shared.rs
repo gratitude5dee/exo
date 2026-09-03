@@ -10,6 +10,7 @@ use exoharness::{
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_util::sync::CancellationToken;
 
 use crate::execution_tracing::{ExecutionTracer, TurnExecutionTrace};
 use crate::{AgentConfig, ExecutionStreamEvent, ExecutionStreamHandle, SendResult};
@@ -99,6 +100,8 @@ where
         + 'static,
 {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let cancellation = CancellationToken::new();
+    let cancelled = cancellation.clone();
 
     let producer = tokio::spawn(async move {
         let session_id = turn.record().session_id;
@@ -114,7 +117,12 @@ where
                 true,
             )
             .await;
-        let send_result = finalize_turn(turn.as_ref(), run(turn_trace.as_deref(), &event_tx).await)
+        let execution = tokio::select! {
+            biased;
+            () = cancelled.cancelled() => Err(anyhow::anyhow!("turn cancelled")),
+            result = run(turn_trace.as_deref(), &event_tx) => result,
+        };
+        let send_result = finalize_turn(turn.as_ref(), execution)
             .await
             .map(|latest_event_id| SendResult {
                 session_id,
@@ -141,7 +149,7 @@ where
     });
 
     ExecutionStreamHandle::new(UnboundedReceiverStream::new(event_rx))
-        .with_producer(producer.abort_handle())
+        .with_producer(producer, cancellation)
 }
 
 async fn finish_turn_trace(
