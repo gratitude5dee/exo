@@ -73,6 +73,7 @@ Usage:
   ./exo.sh write-profile
   ./exo.sh setup-profile
   ./exo.sh setup-sandbox
+  ./exo.sh agentd
 
 Default behavior starts the canonical stack: it creates or reuses an Exo
 agent and conversation with a Docker sandbox, repo self-map mount, ExoChat
@@ -95,6 +96,9 @@ Subcommands:
   setup-sandbox    Pull the sandbox image
   setup-agent      Create the agent and conversation (and pull the sandbox
                    image) without starting anything
+  agentd           Ensure the agent exists, then serve it over the
+                   api_server-compatible /v1/runs + SSE API (exo agentd);
+                   honors API_SERVER_HOST_PORT and API_SERVER_KEY
 
 Options:
   --model <model>              Model binding name (default: gpt-5.6-terra)
@@ -561,6 +565,14 @@ setup_agent() {
   ensure_conversation
   ensure_self_repo_mount
   ensure_agent_cli_mount
+}
+
+run_agentd() {
+  setup_agent
+  echo "Serving agent $AGENT on ${API_SERVER_HOST_PORT:-127.0.0.1:8642} (exo agentd)..."
+  EXO_GLOBAL_ARGS=()
+  append_exo_global_args
+  exec "$EXO_BIN" "${EXO_GLOBAL_ARGS[@]}" --harness "$HARNESS" agentd --agent "$AGENT" -v
 }
 
 agent_exists() {
@@ -1266,6 +1278,10 @@ while [[ $# -gt 0 ]]; do
       shift
       COMMAND="setup-agent"
       ;;
+    agentd)
+      shift
+      COMMAND="agentd"
+      ;;
     build)
       shift
       [[ $# -eq 0 ]] || die "build does not accept additional arguments"
@@ -1526,6 +1542,9 @@ case "$COMMAND" in
     ;;
   setup-agent)
     setup_agent
+    ;;
+  agentd)
+    run_agentd
     ;;
   build)
     build_all

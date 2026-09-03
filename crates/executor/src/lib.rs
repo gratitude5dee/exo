@@ -49,9 +49,9 @@ pub use conversation_events::{
 pub use conversation_wakeup::send_conversation_wakeup;
 pub use executor_types::{
     AgentConfig, AgentHarnessKind, AgentSandboxConfig, ConversationConfig, ConversationModelConfig,
-    ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse,
-    ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult, ToolDefinition,
-    ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
+    ExecutionCancellation, ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest,
+    ModelResponse, ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult,
+    ToolDefinition, ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
 };
 pub use exoharness::{
     AgentHandle, AttachSandboxRequest, BasicExoHarness, BasicExoHarnessConfig, Binding,
@@ -63,10 +63,10 @@ pub use exoharness::{
     PutSecretRequest, RunInSandboxRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
     SandboxBackendRegistration, SandboxId, SandboxProcess, SandboxProvider, SandboxProviderConfig,
     SandboxRecord, SandboxResourceShape, Secret, SecretBackendChoice, SecretMetadata, SessionId,
-    SnapshotId, SpritesBackendSpec, StartSandboxRequest, ToolRequest, Uuid7, VercelBackendSpec,
-    default_aws_agentcore_image, default_daytona_image, default_docker_image, default_e2b_template,
-    default_firecracker_image, default_vercel_image, serve_exoharness_http_listener,
-    serve_exoharness_http_listener_with_options,
+    SnapshotId, SpritesBackendSpec, StartSandboxRequest, ToolArguments, ToolRequest, ToolResult,
+    Uuid7, VercelBackendSpec, default_aws_agentcore_image, default_daytona_image,
+    default_docker_image, default_e2b_template, default_firecracker_image, default_vercel_image,
+    serve_exoharness_http_listener, serve_exoharness_http_listener_with_options,
 };
 #[cfg(feature = "firecracker")]
 pub use exoharness::{
