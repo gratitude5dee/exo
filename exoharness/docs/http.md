@@ -85,7 +85,9 @@ The first HTTP transport is unary only. Durable writes and reads should stay req
 - event watches after a cursor
 - sandbox process stdout/stderr/stdin
 
-Executor/model streaming is outside this transport.
+Executor/model streaming is outside this transport. The executor run surface
+(`exo agentd`: `POST /v1/runs` + SSE) is a separate listener documented in
+[`runs.md`](./runs.md).
 
 ## Local basic server
 

@@ -1,4 +1,7 @@
 mod adapters;
+mod agentd;
+#[cfg(test)]
+mod agentd_tests;
 mod env;
 #[cfg(test)]
 mod env_tests;
@@ -625,6 +628,21 @@ enum Commands {
         #[cfg(feature = "firecracker")]
         #[command(flatten, next_help_heading = "Firecracker backend options")]
         firecracker: FirecrackerArgs,
+    },
+    /// Serve one agent over the `/v1/runs` + SSE executor API (api_server
+    /// compatible). Non-loopback binds require `API_SERVER_KEY`.
+    Agentd {
+        /// Agent slug to serve; every session becomes a conversation on it.
+        #[arg(long, env = "EXO_AGENT")]
+        agent: String,
+        #[arg(long, env = "API_SERVER_HOST_PORT", default_value = "127.0.0.1:8642")]
+        bind: SocketAddr,
+        /// Bearer token clients must present; read from the environment so it
+        /// never appears in process listings.
+        #[arg(long, env = agentd::API_SERVER_KEY_ENV, hide_env_values = true)]
+        api_key: Option<String>,
+        #[arg(short, long, action = ArgAction::Count)]
+        verbose: u8,
     },
 }
 
@@ -2578,6 +2596,23 @@ async fn main() -> Result<()> {
         Commands::Serve { .. } => {
             unreachable!("serve commands are handled before harness instantiation")
         }
+        Commands::Agentd {
+            agent,
+            bind,
+            api_key,
+            verbose,
+        } => {
+            init_agentd_tracing(verbose);
+            agentd::serve_agentd(
+                Arc::clone(&harness),
+                agentd::AgentdConfig {
+                    bind,
+                    agent,
+                    api_key,
+                },
+            )
+            .await?;
+        }
     }
 
     harness.flush_tracing().await?;
@@ -2964,6 +2999,7 @@ fn command_agent_ref(command: &Commands) -> Option<&str> {
             ConversationCommands::CompleteRebuildUpdate { .. } => None,
         },
         Commands::Repl { agent, .. } => Some(agent.as_deref().unwrap_or(DEFAULT_REPL_SLUG)),
+        Commands::Agentd { agent, .. } => Some(agent.as_str()),
         Commands::Secret { .. }
         | Commands::FirecrackerBridge
         | Commands::Sandbox { .. }
@@ -3034,6 +3070,14 @@ async fn serve_exoharness_http(
 }
 
 fn init_serve_tracing(verbosity: u8) {
+    init_target_tracing(HTTP_EXOHARNESS_TRACING_TARGET, verbosity);
+}
+
+fn init_agentd_tracing(verbosity: u8) {
+    init_target_tracing(agentd::AGENTD_TRACING_TARGET, verbosity.max(1));
+}
+
+fn init_target_tracing(target: &'static str, verbosity: u8) {
     if verbosity == 0 {
         return;
     }
@@ -3042,8 +3086,7 @@ fn init_serve_tracing(verbosity: u8) {
     } else {
         tracing_subscriber::filter::LevelFilter::INFO
     };
-    let filter = tracing_subscriber::filter::Targets::new()
-        .with_target(HTTP_EXOHARNESS_TRACING_TARGET, level);
+    let filter = tracing_subscriber::filter::Targets::new().with_target(target, level);
     let layer = tracing_subscriber::fmt::layer()
         .with_target(false)
         .without_time()
