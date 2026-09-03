@@ -13,6 +13,7 @@ use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::OwnedMutexGuard;
+use tokio::task::AbortHandle;
 use tokio_stream::{Stream, wrappers::UnboundedReceiverStream};
 
 use crate::braintrust::BraintrustTracingConfig;
@@ -244,6 +245,7 @@ pub struct SendResult {
 
 pub struct ExecutionStreamHandle {
     event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>,
+    producer: Option<AbortHandle>,
     _send_guard: Option<OwnedMutexGuard<()>>,
 }
 
@@ -251,13 +253,40 @@ impl ExecutionStreamHandle {
     pub fn new(event_stream: UnboundedReceiverStream<Result<ExecutionStreamEvent>>) -> Self {
         Self {
             event_stream,
+            producer: None,
             _send_guard: None,
         }
+    }
+
+    pub(crate) fn with_producer(mut self, producer: AbortHandle) -> Self {
+        self.producer = Some(producer);
+        self
     }
 
     pub(crate) fn with_send_guard(mut self, send_guard: OwnedMutexGuard<()>) -> Self {
         self._send_guard = Some(send_guard);
         self
+    }
+
+    /// Handle that cancels the turn's producer task. Aborting stops model
+    /// calls and tool dispatch at their next await point; the stream then ends
+    /// without a `Completed` event. Present only for turns executed on a
+    /// spawned producer.
+    pub fn cancellation(&self) -> Option<ExecutionCancellation> {
+        self.producer.clone().map(ExecutionCancellation)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionCancellation(AbortHandle);
+
+impl ExecutionCancellation {
+    pub fn cancel(&self) {
+        self.0.abort();
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.0.is_finished()
     }
 }
 

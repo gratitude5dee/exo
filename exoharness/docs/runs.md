@@ -98,8 +98,11 @@ data: {"event": "<name>", ...}
 
 ### `POST /v1/runs/{run_id}/stop`
 
-Aborts the executing turn. Subscribers receive `run.failed` with
-`"error":"run stopped"`; status becomes `stopped`.
+Cancels the executor's turn task (model call, tool dispatch, and pending
+durable writes stop at their next await point) and the SSE relay. Subscribers
+receive `run.failed` with `"error":"run stopped"`; status becomes `stopped`.
+The conversation's send lock is released once the turn task is gone, so the
+next `POST /v1/runs` on the same session starts a fresh turn.
 
 ### `POST /v1/runs/{run_id}/approval`
 
@@ -129,7 +132,10 @@ omitted.
 
 ## Run lifetime
 
-Runs are held in memory for the life of the process. Restarting the daemon
+Runs live in memory. Running runs are always kept; the 64 most recent
+terminal runs are retained for late `/events` subscribers and older ones are
+evicted (`404`). A subscriber that falls more than 1024 events behind is
+disconnected instead of buffered without bound. Restarting the daemon
 forgets run ids (a subscriber gets `404`), but conversations and their
 transcripts persist in exoharness, so the next `POST /v1/runs` with the same
 `session_id` continues where the previous turn left off.

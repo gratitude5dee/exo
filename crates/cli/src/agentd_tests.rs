@@ -2,7 +2,10 @@ use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
 use serde_json::Map;
 
-use crate::agentd::{Run, RunEvent, transcript_rows};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::agentd::{RETAINED_TERMINAL_RUNS, Run, RunEvent, evict_terminal_runs, transcript_rows};
 
 #[test]
 fn sse_frame_names_event_and_embeds_discriminator() {
@@ -117,4 +120,28 @@ async fn stop_without_task_is_a_no_op() {
     });
     assert!(rx.recv().await.is_some());
     assert!(rx.recv().await.is_none());
+}
+
+#[test]
+fn eviction_keeps_running_runs_and_newest_terminal_runs() {
+    let mut runs: HashMap<String, Arc<Run>> = HashMap::new();
+    for index in 0..(RETAINED_TERMINAL_RUNS + 10) {
+        let id = format!("{index:04}");
+        let run = Run::new(id.clone(), "session".to_string());
+        run.publish(RunEvent::Completed {
+            run_id: id.clone(),
+            output: String::new(),
+        });
+        runs.insert(id, run);
+    }
+    let live = Run::new("0000-live".to_string(), "session".to_string());
+    runs.insert("0000-live".to_string(), live);
+
+    evict_terminal_runs(&mut runs);
+
+    assert_eq!(runs.len(), RETAINED_TERMINAL_RUNS + 1);
+    assert!(runs.contains_key("0000-live"));
+    assert!(!runs.contains_key("0000"));
+    assert!(!runs.contains_key("0009"));
+    assert!(runs.contains_key("0010"));
 }

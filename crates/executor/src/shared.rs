@@ -100,7 +100,7 @@ where
 {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-    tokio::spawn(async move {
+    let producer = tokio::spawn(async move {
         let session_id = turn.record().session_id;
         let turn_id = turn.record().id;
         let turn_trace = tracer
@@ -141,6 +141,7 @@ where
     });
 
     ExecutionStreamHandle::new(UnboundedReceiverStream::new(event_rx))
+        .with_producer(producer.abort_handle())
 }
 
 async fn finish_turn_trace(

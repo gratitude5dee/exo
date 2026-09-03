@@ -19,8 +19,8 @@ use actix_web::http::header;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, web};
 use anyhow::{Context as _, Result, bail};
 use executor::{
-    CreateConversationRequest, ExecutionStreamEvent, Harness, HarnessAgent, HarnessConversation,
-    SendRequest, ToolArguments, ToolResult, Uuid7,
+    CreateConversationRequest, ExecutionCancellation, ExecutionStreamEvent, Harness, HarnessAgent,
+    HarnessConversation, SendRequest, ToolArguments, ToolResult, Uuid7,
 };
 use lingua::Message;
 use lingua::universal::{AssistantContent, AssistantContentPart, UserContent, UserContentPart};
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::tui::chunk_text;
 
@@ -101,10 +101,15 @@ enum RunStatus {
     Stopped,
 }
 
+/// Terminal runs kept for late `/events` subscribers before being evicted.
+pub(crate) const RETAINED_TERMINAL_RUNS: usize = 64;
+/// Live events a subscriber may fall behind by before it is disconnected.
+const SUBSCRIBER_BACKLOG: usize = 1024;
+
 struct RunLog {
     events: Vec<RunEvent>,
     status: RunStatus,
-    subscribers: Vec<mpsc::UnboundedSender<RunEvent>>,
+    subscribers: Vec<mpsc::Sender<RunEvent>>,
     approval: Option<ApprovalRequest>,
 }
 
@@ -113,6 +118,7 @@ pub(crate) struct Run {
     session_id: String,
     log: Mutex<RunLog>,
     task: Mutex<Option<JoinHandle<()>>>,
+    cancellation: Mutex<Option<ExecutionCancellation>>,
 }
 
 impl Run {
@@ -127,6 +133,7 @@ impl Run {
                 approval: None,
             }),
             task: Mutex::new(None),
+            cancellation: Mutex::new(None),
         })
     }
 
@@ -141,7 +148,7 @@ impl Run {
             _ => {}
         }
         log.subscribers
-            .retain(|subscriber| subscriber.send(event.clone()).is_ok());
+            .retain(|subscriber| subscriber.try_send(event.clone()).is_ok());
         let terminal = event.is_terminal();
         log.events.push(event);
         if terminal {
@@ -150,11 +157,13 @@ impl Run {
     }
 
     /// Replay everything so far, then follow live events until the run ends.
-    pub(crate) fn subscribe(&self) -> mpsc::UnboundedReceiver<RunEvent> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    /// A subscriber that falls more than `SUBSCRIBER_BACKLOG` events behind is
+    /// dropped rather than buffered without bound.
+    pub(crate) fn subscribe(&self) -> mpsc::Receiver<RunEvent> {
         let mut log = self.log.lock().expect("run log poisoned");
+        let (tx, rx) = mpsc::channel(log.events.len() + SUBSCRIBER_BACKLOG);
         for event in &log.events {
-            if tx.send(event.clone()).is_err() {
+            if tx.try_send(event.clone()).is_err() {
                 break;
             }
         }
@@ -164,12 +173,29 @@ impl Run {
         rx
     }
 
+    fn attach_cancellation(&self, cancellation: Option<ExecutionCancellation>) {
+        *self.cancellation.lock().expect("run cancellation poisoned") = cancellation;
+    }
+
+    /// Cancel the executor's turn (model call, tool dispatch, durable writes)
+    /// and the relay, then mark the run stopped. Returns false when the run
+    /// had already reached a terminal state.
     pub(crate) fn stop(&self) -> bool {
+        let cancellation = self
+            .cancellation
+            .lock()
+            .expect("run cancellation poisoned")
+            .take();
+        if let Some(cancellation) = &cancellation {
+            cancellation.cancel();
+        }
         let handle = self.task.lock().expect("run task poisoned").take();
-        let Some(handle) = handle else {
+        if let Some(handle) = &handle {
+            handle.abort();
+        }
+        if handle.is_none() && cancellation.is_none() {
             return false;
-        };
-        handle.abort();
+        }
         if self.status() != RunStatus::Running {
             return false;
         }
@@ -183,6 +209,29 @@ impl Run {
 
     fn status(&self) -> RunStatus {
         self.log.lock().expect("run log poisoned").status
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.status() != RunStatus::Running
+    }
+}
+
+/// Evict the oldest terminal runs beyond `RETAINED_TERMINAL_RUNS`. Run ids are
+/// UUIDv7, so lexical order is creation order.
+pub(crate) fn evict_terminal_runs(runs: &mut HashMap<String, Arc<Run>>) {
+    let mut terminal: Vec<&String> = runs
+        .iter()
+        .filter(|(_, run)| run.is_terminal())
+        .map(|(id, _)| id)
+        .collect();
+    if terminal.len() <= RETAINED_TERMINAL_RUNS {
+        return;
+    }
+    terminal.sort();
+    let excess = terminal.len() - RETAINED_TERMINAL_RUNS;
+    let evict: Vec<String> = terminal.into_iter().take(excess).cloned().collect();
+    for id in evict {
+        runs.remove(&id);
     }
 }
 
@@ -406,6 +455,8 @@ async fn execute_run(run: Arc<Run>, conversation: Arc<dyn HarnessConversation>, 
             return;
         }
     };
+    run.attach_cancellation(stream.cancellation());
+    let mut completed = false;
     let mut output = String::new();
     let mut tool_names: HashMap<String, String> = HashMap::new();
     while let Some(event) = stream.next().await {
@@ -446,13 +497,13 @@ async fn execute_run(run: Arc<Run>, conversation: Arc<dyn HarnessConversation>, 
             }
             Ok(ExecutionStreamEvent::Completed(result)) => {
                 if let Err(error) = conversation.close_session(result.session_id).await {
-                    tracing::warn!(
-                        target: AGENTD_TRACING_TARGET,
-                        run_id = %run.id,
-                        error = %format!("{error:#}"),
-                        "failed to close turn session"
-                    );
+                    run.publish(RunEvent::Failed {
+                        run_id: run.id.clone(),
+                        error: format!("failed to close turn session: {error:#}"),
+                    });
+                    return;
                 }
+                completed = true;
             }
             Err(error) => {
                 run.publish(RunEvent::Failed {
@@ -462,6 +513,13 @@ async fn execute_run(run: Arc<Run>, conversation: Arc<dyn HarnessConversation>, 
                 return;
             }
         }
+    }
+    if !completed {
+        run.publish(RunEvent::Failed {
+            run_id: run.id.clone(),
+            error: "turn ended without completing".to_string(),
+        });
+        return;
     }
     if output.is_empty()
         && let Ok(messages) = conversation.messages().await
@@ -528,11 +586,11 @@ async fn create_run(
         run_id: run_id.clone(),
         session_id: session_id.clone(),
     });
-    state
-        .runs
-        .lock()
-        .expect("runs poisoned")
-        .insert(run_id.clone(), Arc::clone(&run));
+    {
+        let mut runs = state.runs.lock().expect("runs poisoned");
+        runs.insert(run_id.clone(), Arc::clone(&run));
+        evict_terminal_runs(&mut runs);
+    }
     tracing::info!(
         target: AGENTD_TRACING_TARGET,
         %run_id,
@@ -579,7 +637,7 @@ async fn run_events(
     let Some(run) = state.run(&path) else {
         return not_found("run");
     };
-    let frames = UnboundedReceiverStream::new(run.subscribe())
+    let frames = ReceiverStream::new(run.subscribe())
         .map(|event| Ok::<web::Bytes, actix_web::Error>(web::Bytes::from(event.to_sse_frame())));
     HttpResponse::Ok()
         .content_type("text/event-stream")
@@ -666,8 +724,15 @@ async fn list_sessions(request: HttpRequest, state: web::Data<Arc<AgentdState>>)
     };
     let mut rows = Vec::with_capacity(records.len());
     for record in records {
-        let Ok(Some(conversation)) = state.agent.get_conversation(&record.slug).await else {
-            continue;
+        let conversation = match state.agent.get_conversation(&record.slug).await {
+            Ok(Some(conversation)) => conversation,
+            Ok(None) => continue,
+            Err(error) => {
+                return error_response(
+                    actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("{error:#}"),
+                );
+            }
         };
         match session_row(conversation.as_ref()).await {
             Ok(row) => rows.push(row),
@@ -759,6 +824,11 @@ async fn session_messages(
 }
 
 pub(crate) async fn serve_agentd(harness: Arc<dyn Harness>, config: AgentdConfig) -> Result<()> {
+    if config.api_key.as_deref() == Some("") {
+        bail!(
+            "{API_SERVER_KEY_ENV} is set but empty; unset it for a loopback-only server or provide a real key"
+        );
+    }
     if config.api_key.is_none() && !config.bind.ip().is_loopback() {
         bail!(
             "exo agentd binds {} but {API_SERVER_KEY_ENV} is unset; a non-loopback run surface requires a bearer key",
